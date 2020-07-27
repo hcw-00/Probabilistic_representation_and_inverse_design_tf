@@ -1,5 +1,6 @@
 from __future__ import division
 import os
+from google_drive_downloader import GoogleDriveDownloader as gdd
 import time
 from glob import glob
 import tensorflow as tf
@@ -19,7 +20,7 @@ class vae(object):
         self.batch_size = args.batch_size
         #self.image_size = args.fine_size
         self.L1_lambda = args.L1_lambda
-        self.dataset_dir = args.dataset_dir
+        
         self.alpha = args.alpha
 
         self.feature_extraction_network = feature_extraction_network
@@ -27,18 +28,39 @@ class vae(object):
         self.recognition_network = recognition_network
         self.reconstruction_network = reconstruction_network
         self.mse = mse_criterion
+        self.checkpoint_dir = args.pj_dir + 'checkpoint'
+        self.logs_dir = args.pj_dir + 'logs'
+        self.sample_dir = args.pj_dir + 'sample'
+        self.test_dir =  args.pj_dir + 'test'
+        self.dataset_dir = args.pj_dir + 'data'
+
+
+        if not os.path.exists(self.checkpoint_dir):
+            os.makedirs(self.checkpoint_dir)
+        if not os.path.exists(self.sample_dir):
+            os.makedirs(self.sample_dir)
+        if not os.path.exists(self.test_dir):
+            os.makedirs(self.test_dir)
+        if not os.path.exists(self.dataset_dir):
+            os.makedirs(self.dataset_dir)
+
 
         self._build_model(args)
         
         self.saver = tf.train.Saver(max_to_keep=100)
         
-        #utils._load_data_and_split('./dataset/rcwa_data_0608/rcwa_data_0608.csv', 0.7)_0.8
-        #print()
+        self._load_dataset(args)
+
+    def _load_dataset(self, args):
+        if len(os.listdir(self.dataset_dir)) == 0:
+            gdd.download_file_from_google_drive(file_id='1F1l1c0D4unefRK9m6i2WqBO7dPvkbdKQ',
+                                        dest_path=self.dataset_dir+'/data.zip',
+                                        unzip=True)
         if args.phase == 'train':
-            self.ds = pd.read_csv('./dataset/rcwa_data_0608/rcwa_data_0608_0.7_train.csv')
+            self.ds = pd.read_csv(self.dataset_dir+'/KMAC_new_RCWA_raw_dataset_200612_norm_filename_0.7_train.csv')
         else:
-            self.ds = pd.read_csv('./dataset/rcwa_data_0608/rcwa_data_0608_0.7_test.csv')
-        
+            self.ds = pd.read_csv(self.dataset_dir+'/KMAC_new_RCWA_raw_dataset_200612_norm_filename_0.7_test.csv')
+
     def _load_batch(self, dataset, idx):
         
         filename_list = dataset.iloc[:,0][idx * self.batch_size:(idx + 1) * self.batch_size].values.tolist()
@@ -46,14 +68,12 @@ class vae(object):
         # input batch (2d binary image)
         input_batch = []
         for i in range(len(filename_list)):
-            temp_img = cv2.imread('./dataset/rcwa_data_0608/64/'+filename_list[i], 0)
-            temp_img = temp_img/128 - 1
+            temp_img = cv2.imread(self.dataset_dir+'/64/'+filename_list[i], 0)
+            temp_img = temp_img/255
             input_batch.append(list(temp_img))
         input_batch = np.expand_dims(input_batch, axis=3)
 
-        # target batch (spectrum)
         target_batch = np.expand_dims(dataset.iloc[:,6:][idx * self.batch_size:(idx + 1) * self.batch_size].values.tolist(), 2) # [0.543, ... ] 226개
-        target_batch = target_batch/180
 
         return input_batch, target_batch, filename_list
 
@@ -67,7 +87,6 @@ class vae(object):
         #self.geo_unlabeled = tf.placeholder(tf.float32, [None, 64, 64, 1], name='input_u')
         self.spectrum_target = tf.placeholder(tf.float32, [None, 202, 1], name='spectra_target')
         self.latent_vector = tf.placeholder(tf.float32, [None, args.latent_dims], name='latent_vector')
-
 
         # labeled data sequence
         feature_l = self.feature_extraction_network(self.geo_labeled, reuse=False)
@@ -90,11 +109,8 @@ class vae(object):
         # Labeled data loss
         # KL div loss
         self.KL_div_loss = 0.5 * tf.reduce_sum(tf.square(mu) + tf.exp(log_sigma) - log_sigma - 1., 1)
-        # reconstruction loss ( tf.nn.sigmoid ... =  z * -log(sigmoid(x)) + (1 - z) * -log(1 - sigmoid(x)) <- "negative log")
         self.reconstruction_loss = tf.nn.sigmoid_cross_entropy_with_logits(labels=tf.reshape(self.geo_labeled,[self.batch_size,64*64]),
                                                                     logits=tf.reshape(self.geo_reconstructed_l,[self.batch_size,64*64]))
-        #self.marginal_likelihood_l = self.mse(self.geo_labeled, self.geo_reconstructed_l)
-        
         self.loss_l = args.beta*tf.reduce_mean(self.KL_div_loss) + tf.reduce_mean(self.reconstruction_loss)
 
 
@@ -136,13 +152,13 @@ class vae(object):
         print("initialize")
         init_op = tf.global_variables_initializer()
         self.sess.run(init_op)
-        self.writer = tf.summary.FileWriter("./logs", self.sess.graph)
-
+        self.writer = tf.summary.FileWriter(self.logs_dir, self.sess.graph)
+        
         counter = 1
         start_time = time.time()
 
         if args.continue_train:
-            if self.load(args.checkpoint_dir): 
+            if self.load(self.checkpoint_dir): 
                 print(" [*] Load SUCCESS")
             else:
                 print(" [!] Load failed...")
@@ -165,42 +181,39 @@ class vae(object):
 
                 counter += 1
                 if idx%10==0:
-                    print(("Epoch: [%2d] [%4d/%4d] time: %4.4f loss: %4.4f loss_l: %4.4f loss_r: %4.4f lr: %4.7f kl: %4.7f m: %4.7f" % (
+                    print(("Epoch: [%2d] [%4d/%4d] time: %4.4f loss: %4.4f loss_label: %4.4f loss_reg: %4.4f lr: %4.7f loss_kl: %4.7f loss_recon: %4.7f" % (
                         epoch, idx, batch_idxs, time.time() - start_time, loss,loss_l,loss_r, c_lr, np.mean(kl), np.mean(marginal))))
 
                 if np.mod(counter, args.save_freq) == 20:
-                    self.save(args.checkpoint_dir, counter)
+                    self.save(self.checkpoint_dir, counter)
 
             if epoch%1 == 0: # save sample image
-                cv2.imwrite('./sample/epoch_'+str(epoch)+'_pred.bmp',(geo_re[0,:,:,0]+1)*128)
-                cv2.imwrite('./sample/epoch_'+str(epoch)+'_input.bmp',(input_batch[0,:,:,0]+1)*128)
+                cv2.imwrite(self.sample_dir + '/epoch_'+str(epoch)+'_pred.bmp',(geo_re[0,:,:,0])*255)
+                cv2.imwrite(self.sample_dir + '/epoch_'+str(epoch)+'_input.bmp',(input_batch[0,:,:,0])*255)
 
     def save(self, checkpoint_dir, step):
         model_name = "dnn.model"
         model_dir = "%s" % (self.dataset_dir)
-        checkpoint_dir = os.path.join(checkpoint_dir, model_dir)
+        #checkpoint_dir = checkpoint_dir + '/' + model_dir
 
         if not os.path.exists(checkpoint_dir):
             os.makedirs(checkpoint_dir)
 
         self.saver.save(self.sess,
-                        os.path.join(checkpoint_dir, model_name),
+                        checkpoint_dir+'/'+model_name,
                         global_step=step)
 
     def load(self, checkpoint_dir):
         print(" [*] Reading checkpoint...")
 
-        model_dir = "%s" % (self.dataset_dir)
-        checkpoint_dir = os.path.join(checkpoint_dir, model_dir)
-
         ckpt = tf.train.get_checkpoint_state(checkpoint_dir)
         if ckpt and ckpt.model_checkpoint_path:
             print(ckpt)
-            ckpt_paths = ckpt.all_model_checkpoint_paths    #hcw
+            ckpt_paths = ckpt.all_model_checkpoint_paths
             print(ckpt_paths)
-            #ckpt_name = os.path.basename(ckpt_paths[-1])    #hcw # default [-1]
-            temp_ckpt = 'dnn.model-80520'
-            ckpt_name = os.path.basename(temp_ckpt)
+            ckpt_name = os.path.basename(ckpt_paths[-1])
+            #temp_ckpt = 'dnn.model-80520'
+            #ckpt_name = os.path.basename(temp_ckpt)
             self.saver.restore(self.sess, os.path.join(checkpoint_dir, ckpt_name))
             return True
         else:
@@ -213,23 +226,16 @@ class vae(object):
         init_op = tf.global_variables_initializer()
         self.sess.run(init_op)
 
-        if self.load(args.checkpoint_dir):
+        if self.load(self.checkpoint_dir):
             print(" [*] Load SUCCESS")
         else:
             print(" [!] Load failed...")
 
         counter = 0
 
-
-        if not os.path.exists(os.path.join(args.test_dir,'input')):
-            os.mkdir(os.path.join(args.test_dir,'input'))
-
-
         batch_idxs = len(self.ds) // self.batch_size
 
-        #ds_1 = self.ds.sample(frac=1)
         ds_1 = self.ds
-        #print(ds_1.iloc[:,4:][0:10].values.tolist())
         
         loss_list = []
 
@@ -240,11 +246,11 @@ class vae(object):
 
             input_batch, target_batch, _ = self._load_batch(ds_1, idx)
 
-            geo_pred, pred, loss = self.sess.run([self.geo_reconstructed_l, self.spectra_l_predicted, self.total_loss],
+            geo_pred, pred, loss, loss_r = self.sess.run([self.geo_reconstructed_l, self.spectra_l_predicted, self.total_loss, self.loss_r],
                                                 feed_dict={self.geo_labeled: input_batch, self.spectrum_target: target_batch})
 
 
-            loss_list.append(loss)
+            loss_list.append(loss_r)
 
             counter += 1
             if idx%1==0:
@@ -262,17 +268,11 @@ class vae(object):
                 df_param_target_all = pd.concat([df_param_target_all, df_target], axis=0, sort=False)
                 df_param_pred_all = pd.concat([df_param_pred_all, df_pred], axis=0, sort=False)
 
+            #df_param_target_all.to_csv(self.test_dir+'/result_test_target.csv', index=False)
+            #df_param_pred_all.to_csv(self.test_dir+'/result_test_prediction.csv', index=False)
 
-            df_param_target_all.to_csv('./test/result_test_target.csv', index=False)
-            df_param_pred_all.to_csv('./test/result_test_prediction.csv', index=False)
-
-            #print(np.shape(geo_pred))
-            geo_pred = np.squeeze(geo_pred)
-            #print(geo_pred)
-            #cv2.imwrite('./test/reconstructed/test'+str(idx)+'.bmp',(geo_pred+1)*128)
-            
-        print("loss")
-        print(np.mean(loss_list))
+        print("mean regression loss : ")
+        print(np.mean(loss_list)/args.alpha)
         print("total time")
         print(time.time() - start_time)
 
@@ -285,23 +285,16 @@ class vae(object):
         init_op = tf.global_variables_initializer()
         self.sess.run(init_op)
 
-        if self.load(args.checkpoint_dir):
+        if self.load(self.checkpoint_dir):
             print(" [*] Load SUCCESS")
         else:
             print(" [!] Load failed...")
 
         counter = 0
 
-
-        if not os.path.exists(os.path.join(args.test_dir,'input')):
-            os.mkdir(os.path.join(args.test_dir,'input'))
-
-
         batch_idxs = len(self.ds) // self.batch_size
 
-        #ds_1 = self.ds.sample(frac=1)
         ds_1 = self.ds
-        #print(ds_1.iloc[:,4:][0:10].values.tolist())
         
         loss_list = []
 
@@ -311,15 +304,13 @@ class vae(object):
 
             for j in range(5):
                 latent_vector = list(np.random.normal(0,3,5))
-                #for k in range(5):
-                #    latent_vector[k] = j*0.5 - 2.5
                 print(latent_vector)
                 latent_vector = np.expand_dims(latent_vector, 0)
                 geo_recon = self.sess.run([self.geo_reconstructed], 
                                             feed_dict={self.latent_vector: latent_vector, self.spectrum_target: target_batch})
 
 
-                #print(np.shape(geo_pred))
+                print(self.test_dir+'/reconstruction/')
                 geo_recon = np.squeeze(geo_recon)
-                cv2.imwrite('./test/reconstruction/'+str(filename_list)+'_'+str(latent_vector)+'.bmp',(geo_recon+1)*128)
+                cv2.imwrite(self.test_dir+'/'+str(filename_list)+'_'+str(latent_vector)+'.bmp',(geo_recon+1)*128)
             
