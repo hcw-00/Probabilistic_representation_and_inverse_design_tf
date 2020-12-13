@@ -184,10 +184,10 @@ class vae(object):
                     print(("Epoch: [%2d] [%4d/%4d] time: %4.4f loss: %4.4f loss_label: %4.4f loss_reg: %4.4f lr: %4.7f loss_kl: %4.7f loss_recon: %4.7f" % (
                         epoch, idx, batch_idxs, time.time() - start_time, loss,loss_l,loss_r, c_lr, np.mean(kl), np.mean(marginal))))
 
-                if np.mod(counter, args.save_freq) == 20:
-                    self.save(self.checkpoint_dir, counter)
+            if epoch%500 == 0:
+                self.save(self.checkpoint_dir, counter)
 
-            if epoch%1 == 0: # save sample image
+            if epoch%5 == 0: # save sample image
                 cv2.imwrite(self.sample_dir + '/epoch_'+str(epoch)+'_pred.bmp',(geo_re[0,:,:,0])*255)
                 cv2.imwrite(self.sample_dir + '/epoch_'+str(epoch)+'_input.bmp',(input_batch[0,:,:,0])*255)
 
