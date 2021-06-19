@@ -3,7 +3,7 @@
 Original paper : https://arxiv.org/abs/1901.10819. 
 
 notice :  
-I wrote this codes for my own purpose. so, it might not exact implemention of original papers. However, based on the codes it might be easy to reconstruct the original papers.
+I wrote this codes for my own purpose. so, it might not exact implemention of original papers. However, based on the codes it might be easy to reconstruct the original paper.
 
 # Usage
 ~~~
